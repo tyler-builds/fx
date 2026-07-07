@@ -18,14 +18,12 @@ pub enum ShellRequest {
     Open(PathBuf),
     /// Show the native context menu for these items, at the mouse cursor.
     ContextMenu(Vec<PathBuf>),
-    /// Show the folder-background context menu (New, Paste, ...).
-    BackgroundMenu(PathBuf),
     /// Invoke a canonical verb ("copy", "cut", "delete", ...) on items.
     InvokeVerb(Vec<PathBuf>, &'static str),
-    /// Invoke a verb on a folder's background ("paste").
-    BackgroundVerb(PathBuf, &'static str),
     /// Recycle Bin delete (undo-able), no confirmation UI.
     Recycle(Vec<PathBuf>),
+    /// Paste the clipboard's files into a folder (honours cut = move).
+    PasteInto(PathBuf),
     /// Copy items into a destination folder (drag-drop / paste-into).
     CopyInto {
         sources: Vec<PathBuf>,
@@ -148,10 +146,6 @@ mod win {
                 let dir = paths[0].parent().unwrap_or(&paths[0]);
                 show_menu(hwnd, &cm, dir)
             }
-            ShellRequest::BackgroundMenu(dir) => {
-                let cm = background_context_menu(hwnd, &dir)?;
-                show_menu(hwnd, &cm, &dir)
-            }
             ShellRequest::InvokeVerb(paths, verb) => {
                 let cm = items_context_menu(hwnd, &paths)?;
                 prime_menu(hwnd, &cm)?;
@@ -159,14 +153,12 @@ mod win {
                 invoke_verb(hwnd, &cm, verb, dir)?;
                 Ok(verb != "copy")
             }
-            ShellRequest::BackgroundVerb(dir, verb) => {
-                let cm = background_context_menu(hwnd, &dir)?;
-                prime_menu(hwnd, &cm)?;
-                invoke_verb(hwnd, &cm, verb, &dir)?;
-                Ok(true)
-            }
             ShellRequest::Recycle(paths) => {
                 recycle(&paths)?;
+                Ok(true)
+            }
+            ShellRequest::PasteInto(dir) => {
+                paste_into(hwnd, &dir)?;
                 Ok(true)
             }
             ShellRequest::CopyInto { sources, dest } => {
@@ -278,17 +270,62 @@ mod win {
         }
     }
 
-    /// IContextMenu for a folder's background (paste target, New submenu).
-    fn background_context_menu(hwnd: HWND, dir: &Path) -> Result<IContextMenu, String> {
-        let item: IShellItem =
-            unsafe { SHCreateItemFromParsingName(PCWSTR(wide(dir).as_ptr()), None) }
-                .map_err(|e| format!("{}: {e}", dir.display()))?;
-        let folder: IShellFolder = unsafe { item.BindToHandler(None, &BHID_SFObject) }
-            .map_err(|e| format!("bind folder: {e}"))?;
+    /// Paste the clipboard's files into `dest`. Reads CF_HDROP plus the
+    /// "Preferred DropEffect" format so a cut (move) is honoured, then hands
+    /// the transfer to IFileOperation. The hosted shell "paste" verb needs a
+    /// full folder-view site to work, so we do it directly instead.
+    fn paste_into(hwnd: HWND, dest: &Path) -> Result<(), String> {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        use std::path::PathBuf;
+        use windows::Win32::Foundation::HGLOBAL;
+        use windows::Win32::System::DataExchange::{
+            CloseClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
+        };
+        use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+        use windows::Win32::System::Ole::CF_HDROP;
+        use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+        const DROPEFFECT_MOVE: u32 = 2;
+
         unsafe {
-            folder
-                .CreateViewObject::<IContextMenu>(hwnd)
-                .map_err(|e| format!("CreateViewObject: {e}"))
+            OpenClipboard(Some(hwnd)).map_err(|_| "clipboard is busy".to_string())?;
+            // Everything below must run before CloseClipboard; collect, then close.
+            let read = (|| -> Result<(Vec<PathBuf>, bool), String> {
+                let handle = GetClipboardData(CF_HDROP.0 as u32)
+                    .map_err(|_| "no files on the clipboard".to_string())?;
+                if handle.0.is_null() {
+                    return Err("no files on the clipboard".into());
+                }
+                let hdrop = HDROP(handle.0);
+                let count = DragQueryFileW(hdrop, u32::MAX, None);
+                let mut paths = Vec::with_capacity(count as usize);
+                for i in 0..count {
+                    let len = DragQueryFileW(hdrop, i, None) as usize;
+                    let mut buf = vec![0u16; len + 1];
+                    let n = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
+                    paths.push(PathBuf::from(OsString::from_wide(&buf[..n])));
+                }
+                // "Preferred DropEffect": DROPEFFECT_MOVE means the files were cut.
+                let mut is_move = false;
+                let fmt: Vec<u16> = "Preferred DropEffect\0".encode_utf16().collect();
+                let cf = RegisterClipboardFormatW(PCWSTR(fmt.as_ptr()));
+                if cf != 0 {
+                    if let Ok(h) = GetClipboardData(cf) {
+                        if !h.0.is_null() {
+                            let p = GlobalLock(HGLOBAL(h.0)) as *const u32;
+                            if !p.is_null() {
+                                is_move = *p & DROPEFFECT_MOVE != 0;
+                                let _ = GlobalUnlock(HGLOBAL(h.0));
+                            }
+                        }
+                    }
+                }
+                Ok((paths, is_move))
+            })();
+            let _ = CloseClipboard();
+            let (paths, is_move) = read?;
+            transfer(&paths, dest, is_move)
         }
     }
 

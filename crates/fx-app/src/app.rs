@@ -1069,6 +1069,36 @@ impl SpikeApp {
             });
     }
 
+    /// Empty-space behaviour for a browse view: left-click deselects,
+    /// right-click opens fx's own background menu. The New/Paste actions are
+    /// implemented natively — the shell's hosted background commands need a
+    /// full folder-view site we don't provide, and fail with E_FAIL.
+    fn background_menu(&mut self, bg: &egui::Response) {
+        if bg.clicked() {
+            let tab = &mut self.tabs[self.active_tab];
+            tab.selected.clear();
+            tab.select_anchor = None;
+        }
+        bg.context_menu(|ui| {
+            ui.set_min_width(150.0);
+            if ui.button("New folder").clicked() {
+                self.create_new_folder();
+                ui.close();
+            }
+            if ui.button("Paste").clicked() {
+                if let Some(dir) = self.tabs[self.active_tab].current_dir.clone() {
+                    let _ = self.shell_tx.send(ShellRequest::PasteInto(dir));
+                }
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Refresh").clicked() {
+                self.refresh();
+                ui.close();
+            }
+        });
+    }
+
     /// Quick access + drives down the left edge.
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("sidebar")
@@ -1800,14 +1830,7 @@ impl SpikeApp {
                     self.telem.log("dnd", "internal drop (grid)");
                     let _ = self.shell_tx.send(req);
                 }
-                if bg.clicked() {
-                    self.tabs[active].selected.clear();
-                    self.tabs[active].select_anchor = None;
-                } else if bg.secondary_clicked() {
-                    if let Some(dir) = self.tabs[active].current_dir.clone() {
-                        let _ = self.shell_tx.send(ShellRequest::BackgroundMenu(dir));
-                    }
-                }
+                self.background_menu(&bg);
                 if let Some((idx, name)) = rename_commit {
                     self.commit_rename(idx, &name);
                 }
@@ -2021,14 +2044,7 @@ impl SpikeApp {
                     self.telem.log("dnd", "internal drop");
                     let _ = self.shell_tx.send(req);
                 }
-                if bg.clicked() {
-                    self.tabs[active].selected.clear();
-                    self.tabs[active].select_anchor = None;
-                } else if bg.secondary_clicked() {
-                    if let Some(dir) = self.tabs[active].current_dir.clone() {
-                        let _ = self.shell_tx.send(ShellRequest::BackgroundMenu(dir));
-                    }
-                }
+                self.background_menu(&bg);
                 if let Some((idx, name)) = rename_commit {
                     self.commit_rename(idx, &name);
                 }
@@ -2395,9 +2411,7 @@ impl eframe::App for SpikeApp {
                 Some(Act::Paste) => {
                     if !self.in_drive_search() {
                         if let Some(dir) = self.tab().current_dir.clone() {
-                            let _ = self
-                                .shell_tx
-                                .send(ShellRequest::BackgroundVerb(dir, "paste"));
+                            let _ = self.shell_tx.send(ShellRequest::PasteInto(dir));
                         }
                     }
                 }
