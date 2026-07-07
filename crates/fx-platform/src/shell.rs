@@ -26,6 +26,16 @@ pub enum ShellRequest {
     BackgroundVerb(PathBuf, &'static str),
     /// Recycle Bin delete (undo-able), no confirmation UI.
     Recycle(Vec<PathBuf>),
+    /// Copy items into a destination folder (drag-drop / paste-into).
+    CopyInto {
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    /// Move items into a destination folder.
+    MoveInto {
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+    },
 }
 
 pub enum ShellEvent {
@@ -152,7 +162,48 @@ mod win {
                 recycle(&paths)?;
                 Ok(true)
             }
+            ShellRequest::CopyInto { sources, dest } => {
+                transfer(&sources, &dest, false)?;
+                Ok(true)
+            }
+            ShellRequest::MoveInto { sources, dest } => {
+                transfer(&sources, &dest, true)?;
+                Ok(true)
+            }
         }
+    }
+
+    /// Copy or move `sources` into the `dest` folder via IFileOperation, so
+    /// large transfers get the standard progress + conflict UI and land in
+    /// the undo history like a native Explorer operation.
+    fn transfer(sources: &[std::path::PathBuf], dest: &Path, is_move: bool) -> Result<(), String> {
+        if sources.is_empty() {
+            return Ok(());
+        }
+        let op: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL) }
+            .map_err(|e| format!("FileOperation: {e}"))?;
+        unsafe {
+            op.SetOperationFlags(FOF_ALLOWUNDO)
+                .map_err(|e| e.to_string())?;
+            let dest_item: IShellItem =
+                SHCreateItemFromParsingName(PCWSTR(wide(dest).as_ptr()), None)
+                    .map_err(|e| format!("{}: {e}", dest.display()))?;
+            for src in sources {
+                let item: IShellItem =
+                    SHCreateItemFromParsingName(PCWSTR(wide(src).as_ptr()), None)
+                        .map_err(|e| format!("{}: {e}", src.display()))?;
+                if is_move {
+                    op.MoveItem(&item, &dest_item, PCWSTR::null(), None)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    op.CopyItem(&item, &dest_item, PCWSTR::null(), None)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            op.PerformOperations()
+                .map_err(|e| format!("{}: {e}", if is_move { "move" } else { "copy" }))?;
+        }
+        Ok(())
     }
 
     fn open(path: &Path) -> Result<(), String> {

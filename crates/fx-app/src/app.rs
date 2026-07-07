@@ -1606,10 +1606,12 @@ impl SpikeApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(panel_fill))
             .show_inside(ui, |ui| {
+                let bg = ui.interact(ui.max_rect(), ui.id().with("grid_bg"), Sense::click());
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let width = ui.available_width();
                 let mut navigate_to: Option<PathBuf> = None;
                 let mut rename_commit: Option<(u32, String)> = None;
+                let mut drop_req: Option<ShellRequest> = None;
                 let dir_color = theme::FOLDER_TINT;
                 let text_color = theme::TEXT_PRIMARY;
                 let name_font = FontId::proportional(12.0);
@@ -1628,6 +1630,10 @@ impl SpikeApp {
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .scroll_source(egui::scroll_area::ScrollSource {
+                        drag: false,
+                        ..egui::scroll_area::ScrollSource::ALL
+                    })
                     .show_rows(ui, GRID_TILE_H, n_rows, |ui, range| {
                         for grid_row in range {
                             let (row_rect, _) =
@@ -1649,20 +1655,24 @@ impl SpikeApp {
                                 let resp = ui.interact(
                                     tile.shrink(3.0),
                                     ui.id().with(("tile", i)),
-                                    Sense::click(),
+                                    Sense::click_and_drag(),
                                 );
                                 let painter = ui.painter_at(tile);
                                 if selected.contains(&idx) {
                                     painter.rect_filled(
                                         tile.shrink(3.0),
                                         6.0,
-                                        ui.visuals().selection.bg_fill,
+                                        theme::SELECTION_FILL,
                                     );
                                 } else if resp.hovered() {
-                                    painter.rect_filled(
+                                    painter.rect_filled(tile.shrink(3.0), 6.0, theme::ROW_HOVER);
+                                }
+                                if entry.is_dir && resp.dnd_hover_payload::<DragPaths>().is_some() {
+                                    painter.rect_stroke(
                                         tile.shrink(3.0),
                                         6.0,
-                                        ui.visuals().widgets.hovered.weak_bg_fill,
+                                        Stroke::new(2.0, theme::ACCENT),
+                                        egui::StrokeKind::Inside,
                                     );
                                 }
 
@@ -1728,6 +1738,25 @@ impl SpikeApp {
                                     painter.galley(text_pos, galley, text_color);
                                 }
 
+                                if resp.drag_started() {
+                                    if let Some(dir) = current_dir {
+                                        let set = drag_set(dir, entries, visible, selected, idx);
+                                        egui::DragAndDrop::set_payload(ui.ctx(), DragPaths(set));
+                                    }
+                                }
+                                if entry.is_dir {
+                                    if let Some(payload) = resp.dnd_release_payload::<DragPaths>() {
+                                        if let Some(dir) = current_dir {
+                                            let ctrl = ui.input(|i| i.modifiers.ctrl);
+                                            drop_req = drop_request(
+                                                payload.0.clone(),
+                                                dir.join(&entry.name),
+                                                ctrl,
+                                            );
+                                        }
+                                    }
+                                }
+
                                 if resp.double_clicked() {
                                     if let Some(dir) = current_dir {
                                         if entry.is_dir {
@@ -1767,6 +1796,18 @@ impl SpikeApp {
                         }
                     });
 
+                if let Some(req) = drop_req {
+                    self.telem.log("dnd", "internal drop (grid)");
+                    let _ = self.shell_tx.send(req);
+                }
+                if bg.clicked() {
+                    self.tabs[active].selected.clear();
+                    self.tabs[active].select_anchor = None;
+                } else if bg.secondary_clicked() {
+                    if let Some(dir) = self.tabs[active].current_dir.clone() {
+                        let _ = self.shell_tx.send(ShellRequest::BackgroundMenu(dir));
+                    }
+                }
                 if let Some((idx, name)) = rename_commit {
                     self.commit_rename(idx, &name);
                 }
@@ -1790,11 +1831,18 @@ impl SpikeApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(panel_fill))
             .show_inside(ui, |ui| {
+                // Background catcher, registered first so the header and rows
+                // (drawn after) sit on top for hit-testing. Left-click on the
+                // empty area deselects; right-click opens the folder-background
+                // menu (New, Paste, …).
+                let bg = ui.interact(ui.max_rect(), ui.id().with("list_bg"), Sense::click());
+
                 self.tabs[active].header(ui);
                 ui.spacing_mut().item_spacing.y = 0.0;
 
                 let mut navigate_to: Option<PathBuf> = None;
                 let mut rename_commit: Option<(u32, String)> = None;
+                let mut drop_req: Option<ShellRequest> = None;
                 let dir_color = theme::FOLDER_TINT;
                 let text_color = theme::TEXT_PRIMARY;
                 let weak_color = theme::TEXT_MUTED;
@@ -1815,19 +1863,35 @@ impl SpikeApp {
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    // Scroll by wheel/scrollbar only: a row drag must start an
+                    // item drag, not scroll the list.
+                    .scroll_source(egui::scroll_area::ScrollSource {
+                        drag: false,
+                        ..egui::scroll_area::ScrollSource::ALL
+                    })
                     .show_rows(ui, row_h, visible.len(), |ui, range| {
                         let width = ui.available_width();
                         for row in range {
                             let idx = visible[row];
                             let entry = &entries[idx as usize];
                             let (rect, resp) =
-                                ui.allocate_exact_size(vec2(width, row_h), Sense::click());
+                                ui.allocate_exact_size(vec2(width, row_h), Sense::click_and_drag());
                             if !ui.is_rect_visible(rect) {
                                 continue;
                             }
 
                             let painter = ui.painter_at(rect);
                             paint_row_bg(&painter, rect, selected.contains(&idx), resp.hovered());
+                            // Folder highlighted as a drop target while a drag
+                            // hovers it.
+                            if entry.is_dir && resp.dnd_hover_payload::<DragPaths>().is_some() {
+                                painter.rect_stroke(
+                                    rect.shrink2(vec2(theme::SM, 1.0)),
+                                    theme::RADIUS_SM,
+                                    Stroke::new(2.0, theme::ACCENT),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
 
                             let cols = columns(rect);
                             let mut name_x = cols.name.left() + PAD;
@@ -1899,6 +1963,27 @@ impl SpikeApp {
                                 weak_color,
                             );
 
+                            // Drag source: start carrying the drag set.
+                            if resp.drag_started() {
+                                if let Some(dir) = current_dir {
+                                    let set = drag_set(dir, entries, visible, selected, idx);
+                                    egui::DragAndDrop::set_payload(ui.ctx(), DragPaths(set));
+                                }
+                            }
+                            // Drop target: a folder receiving a dragged set.
+                            if entry.is_dir {
+                                if let Some(payload) = resp.dnd_release_payload::<DragPaths>() {
+                                    if let Some(dir) = current_dir {
+                                        let ctrl = ui.input(|i| i.modifiers.ctrl);
+                                        drop_req = drop_request(
+                                            payload.0.clone(),
+                                            dir.join(&entry.name),
+                                            ctrl,
+                                        );
+                                    }
+                                }
+                            }
+
                             if resp.double_clicked() {
                                 if let Some(dir) = current_dir {
                                     if entry.is_dir {
@@ -1932,6 +2017,18 @@ impl SpikeApp {
                         }
                     });
 
+                if let Some(req) = drop_req {
+                    self.telem.log("dnd", "internal drop");
+                    let _ = self.shell_tx.send(req);
+                }
+                if bg.clicked() {
+                    self.tabs[active].selected.clear();
+                    self.tabs[active].select_anchor = None;
+                } else if bg.secondary_clicked() {
+                    if let Some(dir) = self.tabs[active].current_dir.clone() {
+                        let _ = self.shell_tx.send(ShellRequest::BackgroundMenu(dir));
+                    }
+                }
                 if let Some((idx, name)) = rename_commit {
                     self.commit_rename(idx, &name);
                 }
@@ -2119,6 +2216,46 @@ fn draw_tab(
     (resp.clicked() && !over_x, close)
 }
 
+/// Payload carried during an internal drag: the full paths being dragged.
+/// (egui requires the payload be `Any + Send + Sync`.)
+#[derive(Clone)]
+struct DragPaths(Vec<PathBuf>);
+
+/// The paths to drag when a row is grabbed: the whole selection if the
+/// grabbed row is part of it, otherwise just that row.
+fn drag_set(
+    dir: &Path,
+    entries: &[Entry],
+    visible: &[u32],
+    selected: &HashSet<u32>,
+    idx: u32,
+) -> Vec<PathBuf> {
+    if selected.contains(&idx) && selected.len() > 1 {
+        visible
+            .iter()
+            .filter(|v| selected.contains(v))
+            .map(|&v| dir.join(&entries[v as usize].name))
+            .collect()
+    } else {
+        vec![dir.join(&entries[idx as usize].name)]
+    }
+}
+
+/// Turn a completed internal drop into a shell request: move by default,
+/// copy while Ctrl is held (Explorer's convention). Sources that equal the
+/// destination folder are dropped — you can't move a folder into itself.
+fn drop_request(sources: Vec<PathBuf>, dest: PathBuf, ctrl: bool) -> Option<ShellRequest> {
+    let sources: Vec<PathBuf> = sources.into_iter().filter(|s| *s != dest).collect();
+    if sources.is_empty() {
+        return None;
+    }
+    Some(if ctrl {
+        ShellRequest::CopyInto { sources, dest }
+    } else {
+        ShellRequest::MoveInto { sources, dest }
+    })
+}
+
 /// Selection / hover background for a list row: an inset, rounded fill
 /// (a subtle "pill") rather than an edge-to-edge block — reads cleaner and
 /// modern. No zebra striping.
@@ -2283,6 +2420,29 @@ impl eframe::App for SpikeApp {
         }
 
         let ctx = ui.ctx().clone();
+
+        // Files dropped onto the window from another app (Explorer, etc.):
+        // copy them into the active folder. Cross-app drops default to copy.
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            if let Some(dir) = self.tab().current_dir.clone() {
+                self.telem.log(
+                    "drop",
+                    format!("{} item(s) -> {}", dropped.len(), dir.display()),
+                );
+                let _ = self.shell_tx.send(ShellRequest::CopyInto {
+                    sources: dropped,
+                    dest: dir,
+                });
+            }
+        }
+
         self.drain_channels();
         self.icons.begin_frame(&ctx);
         self.tabs[self.active_tab].refresh_view(&mut self.telem);
@@ -2296,6 +2456,30 @@ impl eframe::App for SpikeApp {
             self.drive_table(ui);
         } else {
             self.file_table(ui);
+        }
+
+        // Hint overlay while files are hovering over the window.
+        let hovering = ctx.input(|i| i.raw.hovered_files.len());
+        if hovering > 0 && !self.in_drive_search() {
+            if let Some(dir) = self.tab().current_dir.clone() {
+                let name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dir.display().to_string());
+                egui::Area::new(egui::Id::new("drop_hint"))
+                    .anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -48.0))
+                    .order(egui::Order::Foreground)
+                    .show(&ctx, |ui| {
+                        egui::Frame::popup(&ctx.global_style()).show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Copy {hovering} item(s) into \u{201c}{name}\u{201d}"
+                                ))
+                                .color(theme::TEXT_PRIMARY),
+                            );
+                        });
+                    });
+            }
         }
 
         // Keep repainting while background work streams in. (Async searches
