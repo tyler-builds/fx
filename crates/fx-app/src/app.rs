@@ -1267,8 +1267,8 @@ impl SpikeApp {
                     .inner_margin(egui::Margin {
                         left: 8,
                         right: 8,
-                        top: 4,
-                        bottom: 6,
+                        top: 9,
+                        bottom: 4,
                     }),
             )
             .show_inside(ui, |ui| {
@@ -1335,7 +1335,7 @@ impl SpikeApp {
                     self.text_input_focused =
                         path_edit.has_focus() || filter_edit.has_focus() || drive_edit.has_focus();
                 });
-                ui.add_space(6.0);
+                ui.add_space(3.0);
                 ui.horizontal(|ui| {
                     // Uniform control height so every widget on the row shares a
                     // baseline (buttons, the segment, the combo, the overflow).
