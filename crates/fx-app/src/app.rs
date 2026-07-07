@@ -16,7 +16,7 @@ use fx_core::{
     synthetic_entries, Batch, Entry, GenMsg, SortKey,
 };
 use fx_index::{FileIndex, IndexMsg, SearchOutput, TailMsg};
-use fx_platform::shell::{spawn_shell_worker, ShellEvent, ShellRequest};
+use fx_platform::shell::{spawn_shell_worker, MenuItem, ShellEvent, ShellRequest};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -442,6 +442,10 @@ pub struct SpikeApp {
     shell_rx: Receiver<ShellEvent>,
     /// In-progress inline rename: (entry index, edit buffer, focused yet).
     rename_state: Option<(u32, String, bool)>,
+    /// Cached shell background-menu enumeration for one folder, so the
+    /// themed right-click menu shows the real (third-party) commands.
+    bg_menu: Option<(PathBuf, Vec<MenuItem>)>,
+    bg_menu_requested: Option<PathBuf>,
     /// Whether any text box (path/filter/search) had focus last frame.
     /// Gates the file-op shortcuts: clicking a row also takes egui focus
     /// (Sense::click is focusable), so "nothing focused" is the wrong test.
@@ -523,6 +527,8 @@ impl SpikeApp {
             shell_tx,
             shell_rx,
             rename_state: None,
+            bg_menu: None,
+            bg_menu_requested: None,
             text_input_focused: false,
             update_ms: VecDeque::with_capacity(240),
             status: String::new(),
@@ -842,6 +848,16 @@ impl SpikeApp {
                     self.telem.log("shell", &e);
                     self.status = e;
                 }
+                ShellEvent::BackgroundMenu { dir, items } => {
+                    self.telem.log(
+                        "bgmenu",
+                        format!("{} items for {}", items.len(), dir.display()),
+                    );
+                    if self.bg_menu_requested.as_deref() == Some(dir.as_path()) {
+                        self.bg_menu_requested = None;
+                    }
+                    self.bg_menu = Some((dir, items));
+                }
             }
         }
         if shell_changed {
@@ -1070,33 +1086,78 @@ impl SpikeApp {
     }
 
     /// Empty-space behaviour for a browse view: left-click deselects,
-    /// right-click opens fx's own background menu. The New/Paste actions are
-    /// implemented natively — the shell's hosted background commands need a
-    /// full folder-view site we don't provide, and fail with E_FAIL.
+    /// right-click opens fx's own themed menu, populated with the folder's
+    /// real shell background commands (third-party tools included). New folder
+    /// and Paste are implemented natively — the shell's own versions need a
+    /// full folder-view site we don't provide — and shown at the top.
     fn background_menu(&mut self, bg: &egui::Response) {
         if bg.clicked() {
             let tab = &mut self.tabs[self.active_tab];
             tab.selected.clear();
             tab.select_anchor = None;
         }
+        let Some(dir) = self.tabs[self.active_tab].current_dir.clone() else {
+            return; // RAM view — no folder to act on
+        };
+
+        // Take the enumerated items for this dir if we have them; otherwise
+        // request them once (the menu shows the native essentials meanwhile).
+        let items: Option<Vec<MenuItem>> = match &self.bg_menu {
+            Some((d, items)) if *d == dir => Some(items.clone()),
+            _ => {
+                if self.bg_menu_requested.as_deref() != Some(dir.as_path()) {
+                    self.bg_menu_requested = Some(dir.clone());
+                    let _ = self
+                        .shell_tx
+                        .send(ShellRequest::EnumBackground(dir.clone()));
+                }
+                None
+            }
+        };
+
+        let mut action: Option<BgAction> = None;
         bg.context_menu(|ui| {
-            ui.set_min_width(150.0);
+            ui.set_min_width(190.0);
             if ui.button("New folder").clicked() {
-                self.create_new_folder();
+                action = Some(BgAction::NewFolder);
                 ui.close();
             }
             if ui.button("Paste").clicked() {
-                if let Some(dir) = self.tabs[self.active_tab].current_dir.clone() {
-                    let _ = self.shell_tx.send(ShellRequest::PasteInto(dir));
-                }
+                action = Some(BgAction::Paste);
                 ui.close();
+            }
+            match &items {
+                Some(items) => {
+                    if items.iter().any(keep_bg_item) {
+                        ui.separator();
+                        render_shell_menu(ui, items, &mut action);
+                    }
+                }
+                None => {
+                    ui.separator();
+                    ui.add_enabled(false, egui::Button::new("Loading commands…"));
+                }
             }
             ui.separator();
             if ui.button("Refresh").clicked() {
-                self.refresh();
+                action = Some(BgAction::Refresh);
                 ui.close();
             }
         });
+
+        match action {
+            Some(BgAction::NewFolder) => self.create_new_folder(),
+            Some(BgAction::Paste) => {
+                let _ = self.shell_tx.send(ShellRequest::PasteInto(dir));
+            }
+            Some(BgAction::Refresh) => self.refresh(),
+            Some(BgAction::Shell(id)) => {
+                let _ = self
+                    .shell_tx
+                    .send(ShellRequest::InvokeBackground { dir, id });
+            }
+            None => {}
+        }
     }
 
     /// Quick access + drives down the left edge.
@@ -2236,6 +2297,73 @@ fn draw_tab(
 /// (egui requires the payload be `Any + Send + Sync`.)
 #[derive(Clone)]
 struct DragPaths(Vec<PathBuf>);
+
+/// A background-menu choice, collected during rendering and applied after
+/// (so the render closure never mutates `self`).
+enum BgAction {
+    NewFolder,
+    Paste,
+    Refresh,
+    Shell(u32),
+}
+
+/// Whether an enumerated shell item belongs in our menu. We drop the ones we
+/// handle natively (paste and the New submenu) and the folder-view built-ins
+/// that can't be invoked without a hosted view (View / Sort by / Group by /
+/// undo), leaving third-party tools and other real commands. Label matching
+/// is English-only for now — a localization pass is future work.
+fn keep_bg_item(item: &MenuItem) -> bool {
+    match item {
+        MenuItem::Separator => true,
+        MenuItem::Command { verb, .. } => !matches!(
+            verb.as_deref(),
+            Some("paste") | Some("pastelink") | Some("undo") | Some("redo")
+        ),
+        MenuItem::Submenu { label, .. } => {
+            let l = label.trim().to_ascii_lowercase();
+            !matches!(
+                l.as_str(),
+                "new" | "view" | "sort by" | "group by" | "arrange icons by"
+            )
+        }
+    }
+}
+
+/// Render enumerated shell items into the themed menu, coalescing runs of
+/// separators and dropping leading/trailing ones.
+fn render_shell_menu(ui: &mut egui::Ui, items: &[MenuItem], action: &mut Option<BgAction>) {
+    let kept: Vec<&MenuItem> = items.iter().filter(|i| keep_bg_item(i)).collect();
+    let mut pending_sep = false;
+    let mut emitted = false;
+    for item in kept {
+        match item {
+            MenuItem::Separator => {
+                pending_sep = emitted;
+            }
+            MenuItem::Command {
+                id, label, enabled, ..
+            } => {
+                if pending_sep {
+                    ui.separator();
+                    pending_sep = false;
+                }
+                if ui.add_enabled(*enabled, egui::Button::new(label)).clicked() {
+                    *action = Some(BgAction::Shell(*id));
+                    ui.close();
+                }
+                emitted = true;
+            }
+            MenuItem::Submenu { label, items } => {
+                if pending_sep {
+                    ui.separator();
+                    pending_sep = false;
+                }
+                ui.menu_button(label, |ui| render_shell_menu(ui, items, action));
+                emitted = true;
+            }
+        }
+    }
+}
 
 /// The paths to drag when a row is grabbed: the whole selection if the
 /// grabbed row is part of it, otherwise just that row.
