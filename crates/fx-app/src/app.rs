@@ -1275,6 +1275,15 @@ impl SpikeApp {
                 let active = self.active_tab;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().interact_size.y = 26.0;
+                    // egui sizes text inputs by font-row + margin, not by
+                    // interact_size, so pin their inner margin to land the
+                    // same 26px height as the buttons/dropdown beside them.
+                    let input_margin = egui::Margin {
+                        left: 7,
+                        right: 7,
+                        top: 5,
+                        bottom: 5,
+                    };
                     if ui
                         .button(icon(egui_phosphor::fill::ARROW_UP))
                         .on_hover_text("Up to parent folder")
@@ -1285,6 +1294,7 @@ impl SpikeApp {
                     let path_edit = ui.add(
                         egui::TextEdit::singleline(&mut self.tabs[active].path_input)
                             .desired_width(ui.available_width() - 480.0)
+                            .margin(input_margin)
                             .hint_text("path (Ctrl+L)"),
                     );
                     if self.focus_target == Some(FocusTarget::Path) {
@@ -1298,6 +1308,7 @@ impl SpikeApp {
                     let filter_edit = ui.add(
                         egui::TextEdit::singleline(&mut self.tabs[active].query)
                             .desired_width(220.0)
+                            .margin(input_margin)
                             .hint_text("filter folder (Ctrl+F)"),
                     );
                     if self.focus_target == Some(FocusTarget::Filter) {
@@ -1310,6 +1321,7 @@ impl SpikeApp {
                     let drive_edit = ui.add(
                         egui::TextEdit::singleline(&mut self.drive_query)
                             .desired_width(ui.available_width())
+                            .margin(input_margin)
                             .hint_text(if self.index.is_some() {
                                 "search whole drive (Ctrl+P)"
                             } else {
