@@ -40,6 +40,8 @@ pub enum ShellRequest {
     /// Invoke a command (by the id from a prior enumeration) on a folder's
     /// background menu.
     InvokeBackground { dir: PathBuf, id: u32 },
+    /// Show the OS properties dialog for a path (folder or file).
+    Properties(PathBuf),
 }
 
 /// One entry in an enumerated shell context menu. Plain data so it can be
@@ -53,6 +55,8 @@ pub enum MenuItem {
         /// wants to override with a native implementation.
         verb: Option<String>,
         enabled: bool,
+        /// The item's shell-provided icon (menu bitmap), if any.
+        icon: Option<crate::RgbaImage>,
     },
     Submenu {
         label: String,
@@ -160,7 +164,7 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetMenuItemCount, GetMenuItemInfoW, GetMenuStringW, MENUITEMINFOW, MFS_GRAYED,
-        MFT_SEPARATOR, MF_BYPOSITION, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_SUBMENU,
+        MFT_SEPARATOR, MF_BYPOSITION, MIIM_BITMAP, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_SUBMENU,
     };
 
     thread_local! {
@@ -218,6 +222,10 @@ mod win {
                 paste_into(hwnd, &dir)?;
                 Ok(true)
             }
+            ShellRequest::Properties(path) => {
+                properties(hwnd, &path)?;
+                Ok(false)
+            }
             ShellRequest::CopyInto { sources, dest } => {
                 transfer(&sources, &dest, false)?;
                 Ok(true)
@@ -264,6 +272,31 @@ mod win {
                 .map_err(|e| format!("{}: {e}", if is_move { "move" } else { "copy" }))?;
         }
         Ok(())
+    }
+
+    /// Show the OS properties dialog. `ShellExecuteEx` with the "properties"
+    /// verb works for any path without a folder-view site (unlike invoking
+    /// Properties from the hosted background menu, which no-ops).
+    fn properties(hwnd: HWND, path: &Path) -> Result<(), String> {
+        use windows::Win32::UI::Shell::{
+            ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW,
+        };
+        let verb: Vec<u16> = "properties"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let file = wide(path);
+        let mut sei = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_INVOKEIDLIST,
+            hwnd,
+            lpVerb: PCWSTR(verb.as_ptr()),
+            lpFile: PCWSTR(file.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        unsafe { ShellExecuteExW(&mut sei) }
+            .map_err(|e| format!("properties for {}: {e}", path.display()))
     }
 
     fn open(path: &Path) -> Result<(), String> {
@@ -432,7 +465,7 @@ mod win {
         for i in 0..count {
             let mut mii = MENUITEMINFOW {
                 cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
-                fMask: MIIM_FTYPE | MIIM_ID | MIIM_STATE | MIIM_SUBMENU,
+                fMask: MIIM_FTYPE | MIIM_ID | MIIM_STATE | MIIM_SUBMENU | MIIM_BITMAP,
                 ..Default::default()
             };
             if unsafe { GetMenuItemInfoW(menu, i as u32, true, &mut mii) }.is_err() {
@@ -463,11 +496,17 @@ mod win {
                 }
             } else if mii.wID != 0 && !label.is_empty() {
                 let enabled = mii.fState.0 & MFS_GRAYED.0 == 0;
+                // Real HBITMAPs are pointers; HBMMENU_* sentinels are small
+                // magic values (and owner-drawn items have none) — skip those.
+                let icon = (mii.hbmpItem.0 as usize > 32)
+                    .then(|| crate::win::hbitmap_to_rgba(mii.hbmpItem))
+                    .flatten();
                 out.push(MenuItem::Command {
                     id: mii.wID,
                     label,
                     verb: command_verb(cm, mii.wID),
                     enabled,
+                    icon,
                 });
             }
         }

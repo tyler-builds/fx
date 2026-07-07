@@ -17,6 +17,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_LibraryLoader",   # GetModuleHandleW for the menu owner window class
     "Win32_System_Memory",           # GlobalLock for the clipboard drop-effect
     "Win32_System_Ole",              # CF_HDROP / DROPEFFECT
+    "Win32_System_Registry",         # gates ShellExecuteExW (properties dialog)
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging", # popup menus + hidden owner window

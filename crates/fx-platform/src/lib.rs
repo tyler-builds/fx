@@ -59,6 +59,7 @@ pub struct IconResult {
 }
 
 /// Straight-alpha RGBA8.
+#[derive(Clone)]
 pub struct RgbaImage {
     pub width: usize,
     pub height: usize,
@@ -226,7 +227,9 @@ mod win {
         image
     }
 
-    fn hbitmap_to_rgba(hbmp: HBITMAP) -> Option<RgbaImage> {
+    /// Convert an HBITMAP (32-bit top-down) to straight-alpha RGBA. Shared
+    /// with the shell-menu enumeration for menu-item icons.
+    pub(crate) fn hbitmap_to_rgba(hbmp: HBITMAP) -> Option<RgbaImage> {
         unsafe {
             let mut bmp = BITMAP::default();
             if GetObjectW(

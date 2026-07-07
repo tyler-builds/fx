@@ -17,7 +17,7 @@ use fx_core::{
 };
 use fx_index::{FileIndex, IndexMsg, SearchOutput, TailMsg};
 use fx_platform::shell::{spawn_shell_worker, MenuItem, ShellEvent, ShellRequest};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -446,6 +446,12 @@ pub struct SpikeApp {
     /// themed right-click menu shows the real (third-party) commands.
     bg_menu: Option<(PathBuf, Vec<MenuItem>)>,
     bg_menu_requested: Option<PathBuf>,
+    /// Textures for background-menu item icons, keyed by command id; cleared
+    /// whenever a new folder's menu is enumerated.
+    bg_icon_tex: HashMap<u32, egui::TextureHandle>,
+    /// A just-created folder to select and drop straight into rename mode
+    /// once the enumeration catches up (Explorer's New-folder behaviour).
+    pending_edit: Option<String>,
     /// Whether any text box (path/filter/search) had focus last frame.
     /// Gates the file-op shortcuts: clicking a row also takes egui focus
     /// (Sense::click is focusable), so "nothing focused" is the wrong test.
@@ -529,6 +535,8 @@ impl SpikeApp {
             rename_state: None,
             bg_menu: None,
             bg_menu_requested: None,
+            bg_icon_tex: HashMap::new(),
+            pending_edit: None,
             text_input_focused: false,
             update_ms: VecDeque::with_capacity(240),
             status: String::new(),
@@ -619,10 +627,33 @@ impl SpikeApp {
         match std::fs::create_dir(dir.join(&name)) {
             Ok(()) => {
                 self.telem.log("shell", format!("new folder {name:?}"));
+                // Select it and enter rename once the re-enumeration lands.
+                self.pending_edit = Some(name);
                 self.refresh();
             }
             Err(e) => self.status = format!("new folder: {e}"),
         }
+    }
+
+    /// After a New-folder create + refresh, once the entry appears, select it
+    /// and open the inline rename editor (Explorer's behaviour).
+    fn resolve_pending_edit(&mut self) {
+        let Some(name) = self.pending_edit.clone() else {
+            return;
+        };
+        let tab = &mut self.tabs[self.active_tab];
+        if tab.rx.is_some() {
+            return; // still enumerating; wait for it to finish
+        }
+        if let Some(idx) = tab.entries.iter().position(|e| e.name == name) {
+            let idx = idx as u32;
+            tab.selected.clear();
+            tab.selected.insert(idx);
+            tab.select_anchor = Some(idx);
+            self.rename_state = Some((idx, name, false));
+        }
+        // Whether found or not, stop looking (a failed create wouldn't set it).
+        self.pending_edit = None;
     }
 
     fn commit_rename(&mut self, idx: u32, new_name: &str) {
@@ -856,6 +887,7 @@ impl SpikeApp {
                     if self.bg_menu_requested.as_deref() == Some(dir.as_path()) {
                         self.bg_menu_requested = None;
                     }
+                    self.bg_icon_tex.clear(); // ids belong to the previous menu
                     self.bg_menu = Some((dir, items));
                 }
             }
@@ -1130,7 +1162,7 @@ impl SpikeApp {
                 Some(items) => {
                     if items.iter().any(keep_bg_item) {
                         ui.separator();
-                        render_shell_menu(ui, items, &mut action);
+                        render_shell_menu(ui, items, &mut action, &mut self.bg_icon_tex);
                     }
                 }
                 None => {
@@ -1151,6 +1183,9 @@ impl SpikeApp {
                 let _ = self.shell_tx.send(ShellRequest::PasteInto(dir));
             }
             Some(BgAction::Refresh) => self.refresh(),
+            Some(BgAction::Properties) => {
+                let _ = self.shell_tx.send(ShellRequest::Properties(dir));
+            }
             Some(BgAction::Shell(id)) => {
                 let _ = self
                     .shell_tx
@@ -2304,6 +2339,7 @@ enum BgAction {
     NewFolder,
     Paste,
     Refresh,
+    Properties,
     Shell(u32),
 }
 
@@ -2331,7 +2367,12 @@ fn keep_bg_item(item: &MenuItem) -> bool {
 
 /// Render enumerated shell items into the themed menu, coalescing runs of
 /// separators and dropping leading/trailing ones.
-fn render_shell_menu(ui: &mut egui::Ui, items: &[MenuItem], action: &mut Option<BgAction>) {
+fn render_shell_menu(
+    ui: &mut egui::Ui,
+    items: &[MenuItem],
+    action: &mut Option<BgAction>,
+    icons: &mut HashMap<u32, egui::TextureHandle>,
+) {
     let kept: Vec<&MenuItem> = items.iter().filter(|i| keep_bg_item(i)).collect();
     let mut pending_sep = false;
     let mut emitted = false;
@@ -2341,14 +2382,29 @@ fn render_shell_menu(ui: &mut egui::Ui, items: &[MenuItem], action: &mut Option<
                 pending_sep = emitted;
             }
             MenuItem::Command {
-                id, label, enabled, ..
+                id,
+                label,
+                verb,
+                enabled,
+                icon,
             } => {
                 if pending_sep {
                     ui.separator();
                     pending_sep = false;
                 }
-                if ui.add_enabled(*enabled, egui::Button::new(label)).clicked() {
-                    *action = Some(BgAction::Shell(*id));
+                let button = match menu_icon_texture(ui, icons, *id, icon) {
+                    Some(tid) => egui::Button::image_and_text(
+                        egui::Image::new(egui::load::SizedTexture::new(tid, vec2(16.0, 16.0))),
+                        label,
+                    ),
+                    None => egui::Button::new(label),
+                };
+                if ui.add_enabled(*enabled, button).clicked() {
+                    *action = Some(if verb.as_deref() == Some("properties") {
+                        BgAction::Properties
+                    } else {
+                        BgAction::Shell(*id)
+                    });
                     ui.close();
                 }
                 emitted = true;
@@ -2358,11 +2414,31 @@ fn render_shell_menu(ui: &mut egui::Ui, items: &[MenuItem], action: &mut Option<
                     ui.separator();
                     pending_sep = false;
                 }
-                ui.menu_button(label, |ui| render_shell_menu(ui, items, action));
+                ui.menu_button(label, |ui| render_shell_menu(ui, items, action, icons));
                 emitted = true;
             }
         }
     }
+}
+
+/// Texture for a menu item's icon, uploaded once and cached by command id.
+fn menu_icon_texture(
+    ui: &egui::Ui,
+    icons: &mut HashMap<u32, egui::TextureHandle>,
+    id: u32,
+    icon: &Option<fx_platform::RgbaImage>,
+) -> Option<egui::TextureId> {
+    if let Some(t) = icons.get(&id) {
+        return Some(t.id());
+    }
+    let img = icon.as_ref()?;
+    let color = egui::ColorImage::from_rgba_unmultiplied([img.width, img.height], &img.pixels);
+    let tex = ui
+        .ctx()
+        .load_texture(format!("bgicon-{id}"), color, egui::TextureOptions::LINEAR);
+    let tid = tex.id();
+    icons.insert(id, tex);
+    Some(tid)
 }
 
 /// The paths to drag when a row is grabbed: the whole selection if the
@@ -2588,6 +2664,7 @@ impl eframe::App for SpikeApp {
         self.drain_channels();
         self.icons.begin_frame(&ctx);
         self.tabs[self.active_tab].refresh_view(&mut self.telem);
+        self.resolve_pending_edit();
         self.refresh_drive_search(&ctx);
 
         self.toolbar(ui);
