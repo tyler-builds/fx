@@ -1,0 +1,10 @@
+[package]
+name = "fx-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Deliberately zero dependencies: the core engine is std-only so it stays
+# tiny, compiles instantly, and never drags UI concerns into the data layer.
+[dependencies]

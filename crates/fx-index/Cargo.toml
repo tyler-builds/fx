@@ -1,0 +1,19 @@
+[package]
+name = "fx-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Raw bindings only (no wrapper layer) for the volume ioctls the MFT reader
+# needs. fx-core stays zero-dependency; platform crates may pay for bindings.
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security", # CreateFileW's SECURITY_ATTRIBUTES param gates it
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_UI_Shell", # ShellExecuteW("runas") for the relaunch-elevated helper
+    "Win32_UI_WindowsAndMessaging", # SHOW_WINDOW_CMD param gates ShellExecuteW
+] }

@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Build
+        run: cargo build --workspace
+      # Portable logic only. The shell/icon tests in fx-platform drive live
+      # COM (context menus, IFileOperation, thumbnail extraction) and need an
+      # interactive desktop session the runner doesn't provide.
+      - name: Test (core + index)
+        run: cargo test -p fx-core -p fx-index
