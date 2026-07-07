@@ -111,8 +111,13 @@ mod win {
     use windows::Win32::UI::Shell::{
         BHID_SFObject, FileOperation, IContextMenu, IContextMenu2, IContextMenu3, IFileOperation,
         IShellFolder, IShellItem, SHCreateItemFromParsingName, ShellExecuteW, CMF_NORMAL,
-        CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT,
+        CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, FOF_ALLOWUNDO,
+        FOF_NOCONFIRMATION, FOF_SILENT,
     };
+
+    // Not exported by the windows crate; documented value (shellapi.h).
+    // Tells InvokeCommand to read the wide (lpVerbW/lpDirectoryW) fields.
+    const CMIC_MASK_UNICODE: u32 = 0x0000_4000;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GetCursorPos,
         RegisterClassW, SetForegroundWindow, TrackPopupMenuEx, HMENU, SW_SHOWNORMAL, TPM_RETURNCMD,
@@ -140,22 +145,24 @@ mod win {
             }
             ShellRequest::ContextMenu(paths) => {
                 let cm = items_context_menu(hwnd, &paths)?;
-                show_menu(hwnd, &cm)
+                let dir = paths[0].parent().unwrap_or(&paths[0]);
+                show_menu(hwnd, &cm, dir)
             }
             ShellRequest::BackgroundMenu(dir) => {
                 let cm = background_context_menu(hwnd, &dir)?;
-                show_menu(hwnd, &cm)
+                show_menu(hwnd, &cm, &dir)
             }
             ShellRequest::InvokeVerb(paths, verb) => {
                 let cm = items_context_menu(hwnd, &paths)?;
                 prime_menu(hwnd, &cm)?;
-                invoke_verb(hwnd, &cm, verb)?;
+                let dir = paths[0].parent().unwrap_or(&paths[0]);
+                invoke_verb(hwnd, &cm, verb, dir)?;
                 Ok(verb != "copy")
             }
             ShellRequest::BackgroundVerb(dir, verb) => {
                 let cm = background_context_menu(hwnd, &dir)?;
                 prime_menu(hwnd, &cm)?;
-                invoke_verb(hwnd, &cm, verb)?;
+                invoke_verb(hwnd, &cm, verb, &dir)?;
                 Ok(true)
             }
             ShellRequest::Recycle(paths) => {
@@ -297,7 +304,7 @@ mod win {
         Ok(menu)
     }
 
-    fn show_menu(hwnd: HWND, cm: &IContextMenu) -> Result<bool, String> {
+    fn show_menu(hwnd: HWND, cm: &IContextMenu, work_dir: &Path) -> Result<bool, String> {
         let menu = prime_menu(hwnd, cm)?;
         ACTIVE_MENU.with(|m| *m.borrow_mut() = Some(cm.clone()));
 
@@ -329,37 +336,67 @@ mod win {
             return Ok(false); // dismissed
         }
         // TPM_RETURNCMD gives the menu item id; offset-1 back to the
-        // handler's command id, passed via the MAKEINTRESOURCE convention.
-        let mut info = CMINVOKECOMMANDINFOEX {
-            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
-            lpVerb: PCSTR((id - 1) as usize as *const u8),
-            nShow: SW_SHOWNORMAL.0,
-            ..Default::default()
-        };
+        // handler's command id (MAKEINTRESOURCE convention: the ordinal in
+        // the pointer's low word, valid as both the ANSI and wide verb).
+        let verb = PCSTR((id - 1) as usize as *const u8);
+        let verb_w = PCWSTR((id - 1) as usize as *const u16);
+        invoke(hwnd, cm, verb, verb_w, work_dir)
+    }
+
+    fn invoke_verb(
+        hwnd: HWND,
+        cm: &IContextMenu,
+        verb: &str,
+        work_dir: &Path,
+    ) -> Result<(), String> {
+        let verb_c = std::ffi::CString::new(verb).map_err(|e| e.to_string())?;
+        let verb_w: Vec<u16> = verb.encode_utf16().chain(std::iter::once(0)).collect();
+        invoke(
+            hwnd,
+            cm,
+            PCSTR(verb_c.as_ptr() as *const u8),
+            PCWSTR(verb_w.as_ptr()),
+            work_dir,
+        )
+        .map(|_| ())
+        .map_err(|e| format!("verb {verb:?}: {e}"))
+    }
+
+    /// Invoke a command, passing the target directory. Background verbs
+    /// (New, Paste) resolve their target from `lpDirectory`, so without it
+    /// they fail with E_FAIL — item verbs carry it in their pidls, but
+    /// setting it for both is correct and harmless.
+    fn invoke(
+        hwnd: HWND,
+        cm: &IContextMenu,
+        verb: PCSTR,
+        verb_w: PCWSTR,
+        work_dir: &Path,
+    ) -> Result<bool, String> {
+        let dir_w = wide(work_dir);
+        let dir_a = std::ffi::CString::new(work_dir.to_string_lossy().as_bytes().to_vec())
+            .unwrap_or_default();
         let mut cursor = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut cursor);
         }
-        info.ptInvoke = cursor;
+        let info = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
+            hwnd,
+            lpVerb: verb,
+            lpVerbW: verb_w,
+            lpDirectory: PCSTR(dir_a.as_ptr() as *const u8),
+            lpDirectoryW: PCWSTR(dir_w.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ptInvoke: cursor,
+            ..Default::default()
+        };
         unsafe {
             cm.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO)
                 .map_err(|e| format!("InvokeCommand: {e}"))?;
         }
         Ok(true)
-    }
-
-    fn invoke_verb(_hwnd: HWND, cm: &IContextMenu, verb: &str) -> Result<(), String> {
-        let verb_c = std::ffi::CString::new(verb).map_err(|e| e.to_string())?;
-        let info = CMINVOKECOMMANDINFOEX {
-            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
-            lpVerb: PCSTR(verb_c.as_ptr() as *const u8),
-            nShow: SW_SHOWNORMAL.0,
-            ..Default::default()
-        };
-        unsafe {
-            cm.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO)
-                .map_err(|e| format!("verb {verb:?}: {e}"))
-        }
     }
 
     pub fn recycle(paths: &[std::path::PathBuf]) -> Result<(), String> {
