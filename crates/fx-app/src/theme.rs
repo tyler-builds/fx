@@ -7,31 +7,44 @@ use eframe::egui::{self, Color32, CornerRadius, Stroke};
 // --- Spacing (4px base) ---
 pub const SM: f32 = 4.0;
 pub const MD: f32 = 8.0;
+pub const LG: f32 = 12.0;
 
 // --- Corner radii ---
-pub const RADIUS_SM: f32 = 4.0;
+pub const RADIUS_SM: f32 = 5.0;
+pub const RADIUS_MD: f32 = 8.0;
 
-// --- Surfaces (near-black, faintly cool) ---
-pub const SURFACE_LIST: Color32 = Color32::from_rgb(24, 25, 28); // file list background
-pub const SURFACE_PANEL: Color32 = Color32::from_rgb(30, 31, 35); // toolbar / sidebar
-pub const SURFACE_FAINT: Color32 = Color32::from_rgb(37, 38, 43); // headers, faint fills
-pub const SURFACE_INPUT: Color32 = Color32::from_rgb(44, 45, 51); // text edits, buttons
-pub const HOVER: Color32 = Color32::from_rgb(52, 54, 61);
-pub const BORDER: Color32 = Color32::from_rgb(50, 52, 59);
+// --- Surfaces ---
+// Deliberate elevation: the chrome (toolbar/sidebar/tabs) sits darkest, and
+// the file list is lifted a step above it so content reads as a raised page,
+// the way the reference separates its rail from its canvas.
+pub const SURFACE_CHROME: Color32 = Color32::from_rgb(23, 24, 28); // toolbar / sidebar / tabs
+pub const SURFACE_LIST: Color32 = Color32::from_rgb(30, 32, 37); // file list / content
+pub const SURFACE_FAINT: Color32 = Color32::from_rgb(38, 40, 46); // headers, cards
+pub const SURFACE_INPUT: Color32 = Color32::from_rgb(43, 45, 52); // text edits, buttons
+pub const HOVER: Color32 = Color32::from_rgb(52, 55, 63);
+/// True hairline — low-contrast so structure is felt, not drawn.
+pub const BORDER: Color32 = Color32::from_rgb(42, 44, 51);
+
+// Back-compat alias: some panels still reference the old chrome name.
+pub const SURFACE_PANEL: Color32 = SURFACE_CHROME;
 
 // --- Text ---
-pub const TEXT_PRIMARY: Color32 = Color32::from_gray(224);
-pub const TEXT_SECONDARY: Color32 = Color32::from_gray(158);
-pub const TEXT_MUTED: Color32 = Color32::from_gray(120);
+pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(232, 233, 237);
+pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(160, 164, 172);
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(120, 124, 132);
+/// Section eyebrows in the sidebar (quiet, so the nav items lead).
+pub const SECTION: Color32 = Color32::from_rgb(128, 132, 140);
 
 // --- Accent (one job: selection / focus) ---
-pub const ACCENT: Color32 = Color32::from_rgb(74, 140, 240);
+pub const ACCENT: Color32 = Color32::from_rgb(88, 150, 246);
 /// Opaque muted-accent fill for a selected row (readable with primary text).
-pub const SELECTION_FILL: Color32 = Color32::from_rgb(44, 78, 134);
+pub const SELECTION_FILL: Color32 = Color32::from_rgb(42, 76, 132);
 /// Subtle folder-name tint — a hair cooler than primary, not the old neon.
 pub const FOLDER_TINT: Color32 = Color32::from_rgb(150, 190, 245);
 /// Row hover wash.
-pub const ROW_HOVER: Color32 = Color32::from_rgb(40, 42, 48);
+pub const ROW_HOVER: Color32 = Color32::from_rgb(41, 43, 50);
+/// Storage-meter track and fill.
+pub const METER_TRACK: Color32 = Color32::from_rgb(48, 50, 58);
 
 /// Install global visuals + type ramp. Call once at startup, after fonts.
 pub fn apply(ctx: &egui::Context) {

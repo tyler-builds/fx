@@ -10,19 +10,91 @@
 
 pub mod shell;
 
-/// Mounted drive roots ("C:\", "D:\", ...) for the sidebar.
+/// A mounted volume for the sidebar: its root, friendly label, and capacity.
+pub struct DriveInfo {
+    pub path: std::path::PathBuf,
+    /// Volume label, e.g. "Windows" ("Local Disk" if unnamed).
+    pub label: String,
+    pub total: u64,
+    pub free: u64,
+}
+
+impl DriveInfo {
+    /// The drive letter, e.g. 'C'.
+    pub fn letter(&self) -> char {
+        self.path
+            .to_string_lossy()
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_ascii_uppercase()
+    }
+}
+
+/// Mounted drives with labels and capacity, for the sidebar.
 #[cfg(windows)]
-pub fn logical_drives() -> Vec<std::path::PathBuf> {
-    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+pub fn drive_info() -> Vec<DriveInfo> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetDiskFreeSpaceExW, GetLogicalDrives, GetVolumeInformationW,
+    };
+
+    let mask = unsafe { GetLogicalDrives() };
     (0..26)
         .filter(|bit| mask & (1 << bit) != 0)
-        .map(|bit| std::path::PathBuf::from(format!("{}:\\", (b'A' + bit as u8) as char)))
+        .map(|bit| {
+            let root = format!("{}:\\", (b'A' + bit as u8) as char);
+            let wide: Vec<u16> = std::ffi::OsStr::new(&root)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut name = [0u16; 64];
+            let label = unsafe {
+                GetVolumeInformationW(
+                    PCWSTR(wide.as_ptr()),
+                    Some(&mut name),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .is_ok()
+            .then(|| {
+                let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+                String::from_utf16_lossy(&name[..end])
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Local Disk".into());
+
+            let (mut total, mut free) = (0u64, 0u64);
+            unsafe {
+                let _ = GetDiskFreeSpaceExW(
+                    PCWSTR(wide.as_ptr()),
+                    None,
+                    Some(&mut total),
+                    Some(&mut free),
+                );
+            }
+            DriveInfo {
+                path: root.into(),
+                label,
+                total,
+                free,
+            }
+        })
         .collect()
 }
 
 #[cfg(not(windows))]
-pub fn logical_drives() -> Vec<std::path::PathBuf> {
-    vec![std::path::PathBuf::from("/")]
+pub fn drive_info() -> Vec<DriveInfo> {
+    vec![DriveInfo {
+        path: std::path::PathBuf::from("/"),
+        label: "Root".into(),
+        total: 0,
+        free: 0,
+    }]
 }
 
 use std::collections::HashSet;

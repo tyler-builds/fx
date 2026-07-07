@@ -24,8 +24,8 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-const ROW_H: f32 = 24.0;
-const LARGE_ROW_H: f32 = 44.0;
+const ROW_H: f32 = 27.0;
+const LARGE_ROW_H: f32 = 46.0;
 const GRID_TILE_W: f32 = 116.0;
 const GRID_TILE_H: f32 = 106.0;
 const GRID_ICON: f32 = 56.0;
@@ -389,7 +389,7 @@ pub struct SpikeApp {
 
     // Sidebar contents, computed once at startup.
     quick_access: Vec<(String, PathBuf)>,
-    drives: Vec<PathBuf>,
+    drives: Vec<fx_platform::DriveInfo>,
     /// One-shot focus request for a toolbar box (Ctrl+L / Ctrl+F / Ctrl+P).
     focus_target: Option<FocusTarget>,
 
@@ -497,7 +497,7 @@ impl SpikeApp {
             }
             quick_access.push(("Home".into(), home.clone()));
         }
-        let drives = fx_platform::logical_drives();
+        let drives = fx_platform::drive_info();
 
         let mut app = Self {
             tabs: vec![BrowseTab::new()],
@@ -1195,40 +1195,51 @@ impl SpikeApp {
         }
     }
 
-    /// Quick access + drives down the left edge.
+    /// Quick access + drives down the left edge: sectioned nav rows with
+    /// icons and selection pills, named drives, and a storage meter.
     fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let cur = self.tabs[self.active_tab].current_dir.clone();
         egui::Panel::left("sidebar")
             .resizable(true)
-            .default_size(160.0)
-            .size_range(120.0..=400.0)
+            .default_size(190.0)
+            .size_range(150.0..=400.0)
+            .frame(
+                egui::Frame::default()
+                    .fill(theme::SURFACE_CHROME)
+                    .inner_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 4,
+                        bottom: 8,
+                    }),
+            )
             .show_inside(ui, |ui| {
                 let mut go: Option<PathBuf> = None;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        // Justified layout makes entries fill the panel width
-                        // — both so they read as real nav rows and so the
-                        // panel occupies its full width (required for the
-                        // resize separator to be draggable).
-                        ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                            ui.add_space(6.0);
-                            ui.strong("Quick access");
-                            for (label, path) in &self.quick_access {
-                                if ui.selectable_label(false, label).clicked() {
-                                    go = Some(path.clone());
-                                }
+                        ui.spacing_mut().item_spacing.y = 2.0;
+
+                        section_label(ui, "Quick access");
+                        for (label, path) in &self.quick_access {
+                            let selected = cur.as_deref() == Some(path.as_path());
+                            if nav_row(ui, quick_glyph(label), label, selected, None) {
+                                go = Some(path.clone());
                             }
-                            ui.add_space(8.0);
-                            ui.strong("Drives");
-                            for drive in &self.drives {
-                                if ui
-                                    .selectable_label(false, drive.display().to_string())
-                                    .clicked()
-                                {
-                                    go = Some(drive.clone());
-                                }
+                        }
+
+                        ui.add_space(theme::LG);
+                        section_label(ui, "Drives");
+                        for drive in &self.drives {
+                            let label = format!("{} ({}:)", drive.label, drive.letter());
+                            let selected = cur.as_deref() == Some(drive.path.as_path());
+                            let meter = (drive.total > 0)
+                                .then(|| 1.0 - drive.free as f32 / drive.total as f32);
+                            if nav_row(ui, egui_phosphor::fill::HARD_DRIVE, &label, selected, meter)
+                            {
+                                go = Some(drive.path.clone());
                             }
-                        });
+                        }
                     });
                 if let Some(path) = go {
                     self.drive_query.clear();
@@ -1286,35 +1297,49 @@ impl SpikeApp {
                 self.text_input_focused =
                     path_edit.has_focus() || filter_edit.has_focus() || drive_edit.has_focus();
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
-                let synth = Self::synth_dir();
-                if self.gen_rx.is_some() {
-                    ui.label(format!("generating... {}", self.gen_progress));
-                } else if ui.button("Generate 100k files").clicked() {
-                    self.gen_progress = 0;
-                    self.gen_rx = Some(spawn_generate(synth, SYNTH_COUNT));
-                }
-                if ui.button("500k (RAM)").clicked() {
-                    self.load_ram_synthetic();
-                }
-                ui.separator();
                 if ui.button("New folder").clicked() {
                     self.create_new_folder();
                 }
                 ui.separator();
-                for (mode, label) in [
-                    (ViewMode::List, "List"),
-                    (ViewMode::LargeList, "Large"),
-                    (ViewMode::Grid, "Grid"),
-                ] {
-                    if ui.selectable_label(self.view_mode == mode, label).clicked() {
-                        self.view_mode = mode;
-                    }
-                }
+
+                // Segmented view control (list / large / grid).
+                egui::Frame::default()
+                    .fill(theme::SURFACE_INPUT)
+                    .corner_radius(theme::RADIUS_SM as u8)
+                    .inner_margin(3)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for (mode, glyph, tip) in [
+                            (
+                                ViewMode::List,
+                                egui_phosphor::fill::LIST_BULLETS,
+                                "List (Ctrl+1)",
+                            ),
+                            (
+                                ViewMode::LargeList,
+                                egui_phosphor::fill::ROWS,
+                                "Large (Ctrl+2)",
+                            ),
+                            (
+                                ViewMode::Grid,
+                                egui_phosphor::fill::SQUARES_FOUR,
+                                "Grid (Ctrl+3)",
+                            ),
+                        ] {
+                            if ui
+                                .selectable_label(self.view_mode == mode, icon(glyph))
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                self.view_mode = mode;
+                            }
+                        }
+                    });
                 ui.separator();
-                // Sort control that works in every view (grid has no
-                // clickable header).
+
+                // Sort control (works in every view; grid has no header).
                 let (cur_sort, asc) = (self.tabs[active].sort, self.tabs[active].ascending);
                 let sort_label = |k: SortKey| match k {
                     SortKey::Name => "Name",
@@ -1353,47 +1378,87 @@ impl SpikeApp {
                     tab.recompute_reason = Some("sort");
                     tab.sort_dirty = true;
                 }
-                ui.separator();
-                if self.index_rx.is_some() {
-                    ui.label(format!("indexing... {}", self.index_progress));
-                } else {
-                    let label = if self.index.is_some() {
-                        "Rebuild index".to_string()
-                    } else if self.mft_ok {
-                        "Build drive index (C:, fast MFT)".to_string()
-                    } else {
-                        "Build drive index (C:, slow walk)".to_string()
-                    };
-                    if ui.button(label).clicked() {
-                        self.index_progress = 0;
-                        self.telem.log("index-start", "C:\\");
-                        self.index_rx = Some(fx_index::spawn_build(PathBuf::from("C:\\")));
+
+                // Right cluster: index status + an overflow menu that keeps
+                // the index and dev/test tools out of the main bar.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.overflow_menu(ui);
+                    if self.index_rx.is_some() {
+                        ui.label(
+                            egui::RichText::new(format!("indexing… {}", self.index_progress))
+                                .color(theme::TEXT_MUTED),
+                        );
+                    } else if self.gen_rx.is_some() {
+                        ui.label(
+                            egui::RichText::new(format!("generating… {}", self.gen_progress))
+                                .color(theme::TEXT_MUTED),
+                        );
                     }
-                    // The MFT pass needs an elevated process; offer the
-                    // relaunch instead of silently indexing 6x slower.
-                    if !self.mft_ok
-                        && ui
-                            .button("Restart as admin (fast index)")
-                            .on_hover_text(
-                                "Reading the NTFS master file table (seconds instead of \
-                                 minutes) requires opening the volume raw, which Windows \
-                                 only allows for elevated processes.",
-                            )
-                            .clicked()
-                    {
-                        self.telem.log("elevate", "relaunching elevated");
-                        if fx_index::relaunch_elevated() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        } else {
-                            self.status = "elevation cancelled or failed".into();
-                        }
-                    }
-                    if !self.index_info.is_empty() {
-                        ui.label(&self.index_info);
-                    }
-                }
+                });
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
+        });
+    }
+
+    /// Overflow "⋯" menu: index management and dev/test tools, kept out of
+    /// the main toolbar so it reads intentional.
+    fn overflow_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(icon(egui_phosphor::fill::DOTS_THREE), |ui| {
+            ui.set_min_width(200.0);
+            if self.index_rx.is_none() {
+                let label = if self.index.is_some() {
+                    "Rebuild drive index"
+                } else if self.mft_ok {
+                    "Build drive index (C:, fast)"
+                } else {
+                    "Build drive index (C:, slow walk)"
+                };
+                if ui.button(label).clicked() {
+                    self.index_progress = 0;
+                    self.telem.log("index-start", "C:\\");
+                    self.index_rx = Some(fx_index::spawn_build(PathBuf::from("C:\\")));
+                    ui.close();
+                }
+                if !self.mft_ok
+                    && ui
+                        .button("Restart as admin (fast index)")
+                        .on_hover_text(
+                            "Reading the NTFS master file table (seconds instead of \
+                             minutes) requires opening the volume raw, which Windows \
+                             only allows for elevated processes.",
+                        )
+                        .clicked()
+                {
+                    self.telem.log("elevate", "relaunching elevated");
+                    if fx_index::relaunch_elevated() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    } else {
+                        self.status = "elevation cancelled or failed".into();
+                    }
+                    ui.close();
+                }
+            }
+            if !self.index_info.is_empty() {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(format!("Index: {}", self.index_info)),
+                );
+            }
+            ui.separator();
+            ui.label(
+                egui::RichText::new("Dev / benchmark")
+                    .size(10.5)
+                    .color(theme::SECTION),
+            );
+            if self.gen_rx.is_none() && ui.button("Generate 100k test files").clicked() {
+                self.gen_progress = 0;
+                self.gen_rx = Some(spawn_generate(Self::synth_dir(), SYNTH_COUNT));
+                ui.close();
+            }
+            if ui.button("Load 500k rows (RAM)").clicked() {
+                self.load_ram_synthetic();
+                ui.close();
+            }
         });
     }
 
@@ -2474,6 +2539,103 @@ fn drop_request(sources: Vec<PathBuf>, dest: PathBuf, ctrl: bool) -> Option<Shel
     } else {
         ShellRequest::MoveInto { sources, dest }
     })
+}
+
+/// A quiet section eyebrow in the sidebar.
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(theme::SM);
+    ui.horizontal(|ui| {
+        ui.add_space(theme::SM);
+        ui.label(
+            egui::RichText::new(text.to_uppercase())
+                .size(10.5)
+                .color(theme::SECTION),
+        );
+    });
+    ui.add_space(2.0);
+}
+
+/// A sidebar nav row: icon + label in a full-width rounded pill, with an
+/// optional thin storage meter drawn under the label (for drives). Returns
+/// true when clicked.
+fn nav_row(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    label: &str,
+    selected: bool,
+    meter: Option<f32>,
+) -> bool {
+    let h = if meter.is_some() { 40.0 } else { 30.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+    let painter = ui.painter_at(rect);
+    if selected {
+        painter.rect_filled(rect, theme::RADIUS_MD, theme::SELECTION_FILL);
+    } else if resp.hovered() {
+        painter.rect_filled(rect, theme::RADIUS_MD, theme::HOVER);
+    }
+    let text_color = if selected {
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    let icon_color = if selected {
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_MUTED
+    };
+    let top = if meter.is_some() {
+        rect.top() + 12.0
+    } else {
+        rect.center().y
+    };
+
+    painter.text(
+        egui::pos2(rect.left() + 12.0, top),
+        Align2::LEFT_CENTER,
+        glyph,
+        crate::fonts::icon_font(15.0),
+        icon_color,
+    );
+    painter.text(
+        egui::pos2(rect.left() + 32.0, top),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.0),
+        text_color,
+    );
+    if let Some(frac) = meter {
+        let track = Rect::from_min_max(
+            egui::pos2(rect.left() + 32.0, rect.bottom() - 12.0),
+            egui::pos2(rect.right() - 10.0, rect.bottom() - 9.0),
+        );
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(track, 1.5, theme::METER_TRACK);
+        let mut fill = track;
+        fill.set_width(track.width() * frac.clamp(0.0, 1.0));
+        // Warn (amber) when the drive is nearly full.
+        let color = if frac > 0.9 {
+            Color32::from_rgb(224, 150, 70)
+        } else {
+            theme::ACCENT
+        };
+        painter.rect_filled(fill, 1.5, color);
+    }
+    resp.clicked()
+}
+
+/// Phosphor glyph for a known quick-access folder name.
+fn quick_glyph(label: &str) -> &'static str {
+    use egui_phosphor::fill as f;
+    match label {
+        "Home" => f::HOUSE,
+        "Desktop" => f::DESKTOP,
+        "Downloads" => f::DOWNLOAD_SIMPLE,
+        "Documents" => f::FILE_TEXT,
+        "Pictures" => f::IMAGE,
+        "Music" => f::MUSIC_NOTE,
+        "Videos" => f::FILM_STRIP,
+        _ => f::FOLDER,
+    }
 }
 
 /// Selection / hover background for a list row: an inset, rounded fill
