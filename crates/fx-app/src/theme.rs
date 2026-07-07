@@ -17,8 +17,8 @@ pub const RADIUS_MD: f32 = 8.0;
 // Deliberate elevation: the chrome (toolbar/sidebar/tabs) sits darkest, and
 // the file list is lifted a step above it so content reads as a raised page,
 // the way the reference separates its rail from its canvas.
-pub const SURFACE_CHROME: Color32 = Color32::from_rgb(23, 24, 28); // toolbar / sidebar / tabs
-pub const SURFACE_LIST: Color32 = Color32::from_rgb(30, 32, 37); // file list / content
+pub const SURFACE_CHROME: Color32 = Color32::from_rgb(24, 25, 27); // toolbar / sidebar / tabs
+pub const SURFACE_LIST: Color32 = Color32::from_rgb(31, 32, 34); // file list / content
 pub const SURFACE_FAINT: Color32 = Color32::from_rgb(38, 40, 46); // headers, cards
 pub const SURFACE_INPUT: Color32 = Color32::from_rgb(43, 45, 52); // text edits, buttons
 pub const HOVER: Color32 = Color32::from_rgb(52, 55, 63);

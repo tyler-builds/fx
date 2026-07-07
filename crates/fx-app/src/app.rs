@@ -1098,9 +1098,13 @@ impl SpikeApp {
                             close = Some(i);
                         }
                     }
-                    ui.add_space(2.0);
+                    ui.add_space(4.0);
                     if ui
-                        .add(egui::Button::new(icon(egui_phosphor::fill::PLUS)).frame(false))
+                        .add(
+                            egui::Button::new(icon(egui_phosphor::fill::PLUS))
+                                .frame(false)
+                                .min_size(vec2(30.0, 28.0)),
+                        )
                         .on_hover_text("New tab (Ctrl+T)")
                         .clicked()
                     {
@@ -1253,7 +1257,12 @@ impl SpikeApp {
             let active = self.active_tab;
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("Up").clicked() {
+                ui.spacing_mut().interact_size.y = 26.0;
+                if ui
+                    .button(icon(egui_phosphor::fill::ARROW_UP))
+                    .on_hover_text("Up to parent folder")
+                    .clicked()
+                {
                     self.navigate_up();
                 }
                 let path_edit = ui.add(
@@ -1299,16 +1308,29 @@ impl SpikeApp {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("New folder").clicked() {
+                // Uniform control height so every widget on the row shares a
+                // baseline (buttons, the segment, the combo, the overflow).
+                ui.spacing_mut().interact_size.y = 26.0;
+                if ui
+                    .button("New folder")
+                    .on_hover_text("New folder (Ctrl+Shift+N)")
+                    .clicked()
+                {
                     self.create_new_folder();
                 }
                 ui.separator();
 
-                // Segmented view control (list / large / grid).
+                // Segmented view control (list / large / grid). Zero vertical
+                // margin so the frame's height matches the sibling buttons.
                 egui::Frame::default()
                     .fill(theme::SURFACE_INPUT)
                     .corner_radius(theme::RADIUS_SM as u8)
-                    .inner_margin(3)
+                    .inner_margin(egui::Margin {
+                        left: 3,
+                        right: 3,
+                        top: 0,
+                        bottom: 0,
+                    })
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         for (mode, glyph, tip) in [
@@ -1403,7 +1425,7 @@ impl SpikeApp {
     /// Overflow "⋯" menu: index management and dev/test tools, kept out of
     /// the main toolbar so it reads intentional.
     fn overflow_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button(icon(egui_phosphor::fill::DOTS_THREE), |ui| {
+        let menu = ui.menu_button(icon(egui_phosphor::fill::DOTS_THREE), |ui| {
             ui.set_min_width(200.0);
             if self.index_rx.is_none() {
                 let label = if self.index.is_some() {
@@ -1460,6 +1482,7 @@ impl SpikeApp {
                 ui.close();
             }
         });
+        menu.response.on_hover_text("Index & tools");
     }
 
     fn perf_bar(&mut self, ui: &mut egui::Ui) {
@@ -2320,7 +2343,8 @@ fn draw_tab(
         .size()
         .x
         .min(150.0);
-    let w = pad + text_w + x_w + 6.0;
+    // Floor the width so short titles ("C:\") still read as a proper tab.
+    let w = (pad + text_w + x_w + 6.0).max(104.0);
     let h = 28.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
     let painter = ui.painter_at(rect);
