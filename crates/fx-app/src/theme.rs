@@ -45,6 +45,9 @@ pub const FOLDER_TINT: Color32 = Color32::from_rgb(150, 190, 245);
 pub const ROW_HOVER: Color32 = Color32::from_rgb(41, 43, 50);
 /// Storage-meter track and fill.
 pub const METER_TRACK: Color32 = Color32::from_rgb(48, 50, 58);
+/// Inactive tab fill — recessed a step below the content/active tab so the
+/// tab strip reads as one set, not floating chips.
+pub const TAB_INACTIVE: Color32 = Color32::from_rgb(27, 28, 31);
 
 /// Install global visuals + type ramp. Call once at startup, after fonts.
 pub fn apply(ctx: &egui::Context) {

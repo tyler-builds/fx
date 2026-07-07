@@ -280,7 +280,7 @@ impl BrowseTab {
         let width = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
+        painter.rect_filled(rect, 0.0, theme::SURFACE_FAINT);
 
         let arrow = if self.ascending {
             egui_phosphor::fill::CARET_UP
@@ -288,8 +288,9 @@ impl BrowseTab {
             egui_phosphor::fill::CARET_DOWN
         };
         let cols = columns(rect);
-        let font = FontId::proportional(13.0);
-        let color = ui.visuals().strong_text_color();
+        let font = FontId::proportional(12.5);
+        let color = theme::TEXT_SECONDARY;
+        let cy = rect.center().y;
 
         for (key, label, col_rect, align) in [
             (SortKey::Name, "Name", cols.name, Align2::LEFT_CENTER),
@@ -301,32 +302,38 @@ impl BrowseTab {
                 Align2::LEFT_CENTER,
             ),
         ] {
-            // Label in the text font; sort caret (if any) painted separately
-            // in the icon font right after it.
             let label_w = painter
                 .layout_no_wrap(label.to_string(), font.clone(), color)
                 .size()
                 .x;
-            let (lx, arrow_x) = match align {
+            // Label plus its sort caret, kept on the correct side of the
+            // column so a right-aligned column (Size) puts the caret to the
+            // LEFT of the label rather than overlapping it.
+            let (label_pos, arrow_pos, arrow_align) = match align {
                 Align2::RIGHT_CENTER => {
                     let right = col_rect.right() - PAD;
-                    (right, right - label_w - 4.0)
+                    (
+                        egui::pos2(right, cy),
+                        egui::pos2(right - label_w - 5.0, cy),
+                        Align2::RIGHT_CENTER,
+                    )
                 }
-                _ => (col_rect.left() + PAD, col_rect.left() + PAD + label_w + 4.0),
+                _ => {
+                    let left = col_rect.left() + PAD;
+                    (
+                        egui::pos2(left, cy),
+                        egui::pos2(left + label_w + 5.0, cy),
+                        Align2::LEFT_CENTER,
+                    )
+                }
             };
-            painter.text(
-                egui::pos2(lx, col_rect.center().y),
-                align,
-                label,
-                font.clone(),
-                color,
-            );
+            painter.text(label_pos, align, label, font.clone(), color);
             if self.sort == key {
                 painter.text(
-                    egui::pos2(arrow_x, col_rect.center().y),
-                    Align2::LEFT_CENTER,
+                    arrow_pos,
+                    arrow_align,
                     arrow,
-                    crate::fonts::icon_font(13.0),
+                    crate::fonts::icon_font(12.0),
                     color,
                 );
             }
@@ -338,7 +345,7 @@ impl BrowseTab {
         painter.hline(
             rect.x_range(),
             rect.bottom(),
-            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            Stroke::new(1.0, theme::BORDER),
         );
     }
 }
@@ -1253,173 +1260,183 @@ impl SpikeApp {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("toolbar").show_inside(ui, |ui| {
-            let active = self.active_tab;
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().interact_size.y = 26.0;
-                if ui
-                    .button(icon(egui_phosphor::fill::ARROW_UP))
-                    .on_hover_text("Up to parent folder")
-                    .clicked()
-                {
-                    self.navigate_up();
-                }
-                let path_edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.tabs[active].path_input)
-                        .desired_width(ui.available_width() - 480.0)
-                        .hint_text("path (Ctrl+L)"),
-                );
-                if self.focus_target == Some(FocusTarget::Path) {
-                    path_edit.request_focus();
-                    self.focus_target = None;
-                }
-                if path_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    let p = PathBuf::from(self.tabs[active].path_input.trim());
-                    self.navigate(p);
-                }
-                let filter_edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.tabs[active].query)
-                        .desired_width(220.0)
-                        .hint_text("filter folder (Ctrl+F)"),
-                );
-                if self.focus_target == Some(FocusTarget::Filter) {
-                    filter_edit.request_focus();
-                    self.focus_target = None;
-                }
-                if filter_edit.changed() {
-                    self.tabs[active].recompute_reason = Some("query");
-                }
-                let drive_edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.drive_query)
-                        .desired_width(ui.available_width() - 8.0)
-                        .hint_text(if self.index.is_some() {
-                            "search whole drive (Ctrl+P)"
-                        } else {
-                            "search drive (build index first)"
-                        }),
-                );
-                if self.focus_target == Some(FocusTarget::DriveSearch) {
-                    drive_edit.request_focus();
-                    self.focus_target = None;
-                }
-                self.text_input_focused =
-                    path_edit.has_focus() || filter_edit.has_focus() || drive_edit.has_focus();
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                // Uniform control height so every widget on the row shares a
-                // baseline (buttons, the segment, the combo, the overflow).
-                ui.spacing_mut().interact_size.y = 26.0;
-                if ui
-                    .button("New folder")
-                    .on_hover_text("New folder (Ctrl+Shift+N)")
-                    .clicked()
-                {
-                    self.create_new_folder();
-                }
-                ui.separator();
-
-                // Segmented view control (list / large / grid). Zero vertical
-                // margin so the frame's height matches the sibling buttons.
+        egui::Panel::top("toolbar")
+            .frame(
                 egui::Frame::default()
-                    .fill(theme::SURFACE_INPUT)
-                    .corner_radius(theme::RADIUS_SM as u8)
+                    .fill(theme::SURFACE_CHROME)
                     .inner_margin(egui::Margin {
-                        left: 3,
-                        right: 3,
-                        top: 0,
-                        bottom: 0,
-                    })
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        for (mode, glyph, tip) in [
-                            (
-                                ViewMode::List,
-                                egui_phosphor::fill::LIST_BULLETS,
-                                "List (Ctrl+1)",
-                            ),
-                            (
-                                ViewMode::LargeList,
-                                egui_phosphor::fill::ROWS,
-                                "Large (Ctrl+2)",
-                            ),
-                            (
-                                ViewMode::Grid,
-                                egui_phosphor::fill::SQUARES_FOUR,
-                                "Grid (Ctrl+3)",
-                            ),
-                        ] {
-                            if ui
-                                .selectable_label(self.view_mode == mode, icon(glyph))
-                                .on_hover_text(tip)
-                                .clicked()
-                            {
-                                self.view_mode = mode;
-                            }
-                        }
-                    });
-                ui.separator();
-
-                // Sort control (works in every view; grid has no header).
-                let (cur_sort, asc) = (self.tabs[active].sort, self.tabs[active].ascending);
-                let sort_label = |k: SortKey| match k {
-                    SortKey::Name => "Name",
-                    SortKey::Size => "Size",
-                    SortKey::Modified => "Modified",
-                };
-                egui::ComboBox::from_id_salt("sortsel")
-                    .selected_text(format!("Sort: {}", sort_label(cur_sort)))
-                    .show_ui(ui, |ui| {
-                        for key in [SortKey::Name, SortKey::Size, SortKey::Modified] {
-                            if ui
-                                .selectable_label(cur_sort == key, sort_label(key))
-                                .clicked()
-                                && cur_sort != key
-                            {
-                                let tab = &mut self.tabs[active];
-                                tab.sort = key;
-                                tab.ascending = key == SortKey::Name;
-                                tab.recompute_reason = Some("sort");
-                                tab.sort_dirty = true;
-                            }
-                        }
-                    });
-                let dir_glyph = if asc {
-                    egui_phosphor::fill::SORT_ASCENDING
-                } else {
-                    egui_phosphor::fill::SORT_DESCENDING
-                };
-                if ui
-                    .button(icon(dir_glyph))
-                    .on_hover_text("Toggle sort direction")
-                    .clicked()
-                {
-                    let tab = &mut self.tabs[active];
-                    tab.ascending = !tab.ascending;
-                    tab.recompute_reason = Some("sort");
-                    tab.sort_dirty = true;
-                }
-
-                // Right cluster: index status + an overflow menu that keeps
-                // the index and dev/test tools out of the main bar.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    self.overflow_menu(ui);
-                    if self.index_rx.is_some() {
-                        ui.label(
-                            egui::RichText::new(format!("indexing… {}", self.index_progress))
-                                .color(theme::TEXT_MUTED),
-                        );
-                    } else if self.gen_rx.is_some() {
-                        ui.label(
-                            egui::RichText::new(format!("generating… {}", self.gen_progress))
-                                .color(theme::TEXT_MUTED),
-                        );
+                        left: 8,
+                        right: 8,
+                        top: 4,
+                        bottom: 6,
+                    }),
+            )
+            .show_inside(ui, |ui| {
+                let active = self.active_tab;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().interact_size.y = 26.0;
+                    if ui
+                        .button(icon(egui_phosphor::fill::ARROW_UP))
+                        .on_hover_text("Up to parent folder")
+                        .clicked()
+                    {
+                        self.navigate_up();
                     }
+                    let path_edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.tabs[active].path_input)
+                            .desired_width(ui.available_width() - 480.0)
+                            .hint_text("path (Ctrl+L)"),
+                    );
+                    if self.focus_target == Some(FocusTarget::Path) {
+                        path_edit.request_focus();
+                        self.focus_target = None;
+                    }
+                    if path_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let p = PathBuf::from(self.tabs[active].path_input.trim());
+                        self.navigate(p);
+                    }
+                    let filter_edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.tabs[active].query)
+                            .desired_width(220.0)
+                            .hint_text("filter folder (Ctrl+F)"),
+                    );
+                    if self.focus_target == Some(FocusTarget::Filter) {
+                        filter_edit.request_focus();
+                        self.focus_target = None;
+                    }
+                    if filter_edit.changed() {
+                        self.tabs[active].recompute_reason = Some("query");
+                    }
+                    let drive_edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.drive_query)
+                            .desired_width(ui.available_width())
+                            .hint_text(if self.index.is_some() {
+                                "search whole drive (Ctrl+P)"
+                            } else {
+                                "search drive (build index first)"
+                            }),
+                    );
+                    if self.focus_target == Some(FocusTarget::DriveSearch) {
+                        drive_edit.request_focus();
+                        self.focus_target = None;
+                    }
+                    self.text_input_focused =
+                        path_edit.has_focus() || filter_edit.has_focus() || drive_edit.has_focus();
                 });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    // Uniform control height so every widget on the row shares a
+                    // baseline (buttons, the segment, the combo, the overflow).
+                    ui.spacing_mut().interact_size.y = 26.0;
+                    if ui
+                        .button("New folder")
+                        .on_hover_text("New folder (Ctrl+Shift+N)")
+                        .clicked()
+                    {
+                        self.create_new_folder();
+                    }
+                    ui.separator();
+
+                    // Segmented view control (list / large / grid). Zero vertical
+                    // margin so the frame's height matches the sibling buttons.
+                    egui::Frame::default()
+                        .fill(theme::SURFACE_INPUT)
+                        .corner_radius(theme::RADIUS_SM as u8)
+                        .inner_margin(egui::Margin {
+                            left: 3,
+                            right: 3,
+                            top: 0,
+                            bottom: 0,
+                        })
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for (mode, glyph, tip) in [
+                                (
+                                    ViewMode::List,
+                                    egui_phosphor::fill::LIST_BULLETS,
+                                    "List (Ctrl+1)",
+                                ),
+                                (
+                                    ViewMode::LargeList,
+                                    egui_phosphor::fill::ROWS,
+                                    "Large (Ctrl+2)",
+                                ),
+                                (
+                                    ViewMode::Grid,
+                                    egui_phosphor::fill::SQUARES_FOUR,
+                                    "Grid (Ctrl+3)",
+                                ),
+                            ] {
+                                if ui
+                                    .selectable_label(self.view_mode == mode, icon(glyph))
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    self.view_mode = mode;
+                                }
+                            }
+                        });
+                    ui.separator();
+
+                    // Sort control (works in every view; grid has no header).
+                    let (cur_sort, asc) = (self.tabs[active].sort, self.tabs[active].ascending);
+                    let sort_label = |k: SortKey| match k {
+                        SortKey::Name => "Name",
+                        SortKey::Size => "Size",
+                        SortKey::Modified => "Modified",
+                    };
+                    egui::ComboBox::from_id_salt("sortsel")
+                        .selected_text(format!("Sort: {}", sort_label(cur_sort)))
+                        .show_ui(ui, |ui| {
+                            for key in [SortKey::Name, SortKey::Size, SortKey::Modified] {
+                                if ui
+                                    .selectable_label(cur_sort == key, sort_label(key))
+                                    .clicked()
+                                    && cur_sort != key
+                                {
+                                    let tab = &mut self.tabs[active];
+                                    tab.sort = key;
+                                    tab.ascending = key == SortKey::Name;
+                                    tab.recompute_reason = Some("sort");
+                                    tab.sort_dirty = true;
+                                }
+                            }
+                        });
+                    let dir_glyph = if asc {
+                        egui_phosphor::fill::SORT_ASCENDING
+                    } else {
+                        egui_phosphor::fill::SORT_DESCENDING
+                    };
+                    if ui
+                        .button(icon(dir_glyph))
+                        .on_hover_text("Toggle sort direction")
+                        .clicked()
+                    {
+                        let tab = &mut self.tabs[active];
+                        tab.ascending = !tab.ascending;
+                        tab.recompute_reason = Some("sort");
+                        tab.sort_dirty = true;
+                    }
+
+                    // Right cluster: index status + an overflow menu that keeps
+                    // the index and dev/test tools out of the main bar.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.overflow_menu(ui);
+                        if self.index_rx.is_some() {
+                            ui.label(
+                                egui::RichText::new(format!("indexing… {}", self.index_progress))
+                                    .color(theme::TEXT_MUTED),
+                            );
+                        } else if self.gen_rx.is_some() {
+                            ui.label(
+                                egui::RichText::new(format!("generating… {}", self.gen_progress))
+                                    .color(theme::TEXT_MUTED),
+                            );
+                        }
+                    });
+                });
+                ui.add_space(6.0);
             });
-            ui.add_space(6.0);
-        });
     }
 
     /// Overflow "⋯" menu: index management and dev/test tools, kept out of
@@ -2349,29 +2366,29 @@ fn draw_tab(
     let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
     let painter = ui.painter_at(rect);
 
+    // Subtle top rounding, square bottom so tabs connect to the content
+    // strip. Same shape for every tab; the active one is distinguished by a
+    // lighter fill + accent bar, and inactive tabs are *recessed* (darker
+    // than active) rather than lighter, so they read as one set instead of
+    // popping as rounded chips.
     let radius = egui::CornerRadius {
-        nw: 6,
-        ne: 6,
+        nw: 5,
+        ne: 5,
         sw: 0,
         se: 0,
     };
     let bg = if active {
         theme::SURFACE_LIST
     } else if resp.hovered() {
-        theme::ROW_HOVER
+        theme::HOVER
     } else {
-        theme::SURFACE_FAINT
+        theme::TAB_INACTIVE
     };
     painter.rect_filled(rect, radius, bg);
     if active {
         painter.rect_filled(
             Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.top() + 2.0)),
-            egui::CornerRadius {
-                nw: 6,
-                ne: 6,
-                sw: 0,
-                se: 0,
-            },
+            radius,
             theme::ACCENT,
         );
     }
